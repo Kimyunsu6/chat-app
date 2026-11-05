@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="ko">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>채팅방</title>
+	<style>
+		body {
+			font-family: sans-serif;
+			max-width: 600px;
+			margin: 0 auto;
+			padding: 16px;
+		}
+
+		form {
+			display: flex;
+			gap: 8px;
+		}
+
+		input {
+			flex: 1;
+			min-width: 0;
+			padding: 8px;
+			font-size: 16px;
+		}
+
+		button {
+			padding: 8px 16px;
+			font-size: 16px;
+		}
+
+		#messages {
+			height: 400px;
+			overflow-y: auto;
+			border: 1px solid #ccc;
+			border-radius: 4px;
+			padding: 8px;
+			margin-bottom: 8px;
+		}
+
+		#messages p {
+			margin: 4px 0;
+			overflow-wrap: anywhere;
+		}
+
+		.notice {
+			color: #666;
+		}
+
+		.hidden {
+			display: none;
+		}
+	</style>
+</head>
+<body>
+	<h1>채팅방</h1>
+
+	<!-- 입장 화면 -->
+	<form id="join-form">
+		<input id="nickname-input" placeholder="닉네임" maxlength="20" required>
+		<button type="submit">입장</button>
+	</form>
+
+	<!-- 채팅 화면 (입장하기 전에는 숨겨 둠) -->
+	<div id="chat-screen" class="hidden">
+		<div id="messages"></div>
+		<form id="message-form">
+			<input id="message-input" placeholder="메시지 입력" maxlength="1000" autocomplete="off" required>
+			<button type="submit">보내기</button>
+		</form>
+	</div>
+
+	<script>
+		const joinForm = document.getElementById("join-form");
+		const nicknameInput = document.getElementById("nickname-input");
+		const chatScreen = document.getElementById("chat-screen");
+		const messages = document.getElementById("messages");
+		const messageForm = document.getElementById("message-form");
+		const messageInput = document.getElementById("message-input");
+
+		let socket = null;
+
+		// 메시지 한 줄을 화면에 추가한다.
+		// textContent를 쓰면 누가 HTML 코드를 보내도 글자로만 보여서 안전하다.
+		function addLine(text, className) {
+			const line = document.createElement("p");
+			line.textContent = text;
+			line.className = className;
+			messages.appendChild(line);
+			messages.scrollTop = messages.scrollHeight;
+		}
+
+		// 입장 버튼을 눌렀을 때
+		joinForm.addEventListener("submit", function (event) {
+			event.preventDefault();
+
+			const nickname = nicknameInput.value.trim();
+			if (nickname === "") {
+				return;
+			}
+
+			// https 주소에서는 wss, http 주소에서는 ws를 쓴다.
+			let protocol = "ws:";
+			if (location.protocol === "https:") {
+				protocol = "wss:";
+			}
+			const address = protocol + "//" + location.host + "/ws?nickname=" + encodeURIComponent(nickname);
+
+			socket = new WebSocket(address);
+
+			socket.addEventListener("open", function () {
+				joinForm.classList.add("hidden");
+				chatScreen.classList.remove("hidden");
+				addLine(nickname + " 님으로 입장했어요.", "notice");
+				messageInput.focus();
+			});
+
+			// 서버에서 메시지가 왔을 때
+			socket.addEventListener("message", function (event) {
+				const data = JSON.parse(event.data);
+				addLine(data.nickname + ": " + data.text, "");
+			});
+
+			socket.addEventListener("close", function () {
+				addLine("연결이 끊어졌어요. 새로고침해서 다시 입장해 주세요.", "notice");
+			});
+		});
+
+		// 보내기 버튼을 눌렀을 때
+		messageForm.addEventListener("submit", function (event) {
+			event.preventDefault();
+
+			const text = messageInput.value.trim();
+			if (text === "" || socket.readyState !== WebSocket.OPEN) {
+				return;
+			}
+
+			socket.send(text);
+			messageInput.value = "";
+			messageInput.focus();
+		});
+	</script>
+</body>
+</html>
