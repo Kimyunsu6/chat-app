@@ -53,10 +53,16 @@
 	</style>
 </head>
 <body>
-	<h1>채팅방</h1>
+	<h1 id="title">채팅방</h1>
 
-	<!-- 입장 화면 -->
-	<form id="join-form">
+	<!-- 방 고르기 화면 (주소가 / 일 때) -->
+	<form id="room-form" class="hidden">
+		<input id="room-input" placeholder="방 이름 (예: 축구)" maxlength="20" required>
+		<button type="submit">방으로 가기</button>
+	</form>
+
+	<!-- 입장 화면 (주소가 /room/방이름 일 때) -->
+	<form id="join-form" class="hidden">
 		<input id="nickname-input" placeholder="닉네임" maxlength="20" required>
 		<button type="submit">입장</button>
 	</form>
@@ -78,7 +84,46 @@
 		const messageForm = document.getElementById("message-form");
 		const messageInput = document.getElementById("message-input");
 
+		const title = document.getElementById("title");
+		const roomForm = document.getElementById("room-form");
+		const roomInput = document.getElementById("room-input");
+
 		let socket = null;
+
+		// 주소에서 방 이름을 꺼낸다. (예: /room/축구 → "축구")
+		// 주소에 한글은 %EC%B6%95... 처럼 바뀌어 있어서 decodeURIComponent로 되돌린다.
+		let roomName = "";
+		if (location.pathname.startsWith("/room/")) {
+			try {
+				roomName = decodeURIComponent(location.pathname.slice("/room/".length)).trim();
+			} catch (error) {
+				roomName = "";
+			}
+		}
+
+		if (roomName === "" || roomName.length > 20) {
+			// 방 이름이 없거나 이상하면 방 고르기 화면을 보여준다.
+			roomForm.classList.remove("hidden");
+			roomInput.focus();
+		} else {
+			// 방 이름이 있으면 제목에 쓰고 입장 화면을 보여준다.
+			title.textContent = roomName + " 방";
+			document.title = roomName + " 방";
+			joinForm.classList.remove("hidden");
+			nicknameInput.focus();
+		}
+
+		// 방으로 가기 버튼을 눌렀을 때
+		roomForm.addEventListener("submit", function (event) {
+			event.preventDefault();
+
+			const name = roomInput.value.trim();
+			if (name === "") {
+				return;
+			}
+
+			location.href = "/room/" + encodeURIComponent(name);
+		});
 
 		// 메시지 한 줄을 화면에 추가한다.
 		// textContent를 쓰면 누가 HTML 코드를 보내도 글자로만 보여서 안전하다.
@@ -104,14 +149,14 @@
 			if (location.protocol === "https:") {
 				protocol = "wss:";
 			}
-			const address = protocol + "//" + location.host + "/ws?nickname=" + encodeURIComponent(nickname);
+			const address = protocol + "//" + location.host + "/ws?room=" + encodeURIComponent(roomName) + "&nickname=" + encodeURIComponent(nickname);
 
 			socket = new WebSocket(address);
 
 			socket.addEventListener("open", function () {
 				joinForm.classList.add("hidden");
 				chatScreen.classList.remove("hidden");
-				addLine(nickname + " 님으로 입장했어요.", "notice");
+				addLine(nickname + " 님으로 입장했어요. (최근 메시지 50개까지 보여요)", "notice");
 				messageInput.focus();
 			});
 

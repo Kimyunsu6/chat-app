@@ -24,7 +24,9 @@
 		]
 	},
 	"assets": {
-		"directory": "./public/"
+		"directory": "./public/",
+		// /room/축구 처럼 없는 주소로 들어와도 index.html을 보여준다.
+		"not_found_handling": "single-page-application"
 	},
 	"observability": {
 		"enabled": true
