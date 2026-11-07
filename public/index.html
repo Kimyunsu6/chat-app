@@ -29,6 +29,30 @@
 			font-size: 16px;
 		}
 
+		#auth-form {
+			flex-direction: column;
+		}
+
+		#auth-buttons {
+			display: flex;
+			gap: 8px;
+		}
+
+		#auth-buttons button {
+			flex: 1;
+		}
+
+		#user-bar {
+			display: flex;
+			justify-content: space-between;
+			align-items: center;
+			margin-bottom: 8px;
+		}
+
+		#auth-error {
+			color: #c00;
+		}
+
 		#messages {
 			height: 400px;
 			overflow-y: auto;
@@ -48,12 +72,29 @@
 		}
 
 		.hidden {
-			display: none;
+			display: none !important;
 		}
 	</style>
 </head>
 <body>
 	<h1 id="title">채팅방</h1>
+
+	<!-- 로그인한 사람 이름과 로그아웃 버튼 (로그인하면 보임) -->
+	<div id="user-bar" class="hidden">
+		<span id="user-name"></span>
+		<button id="logout-button" type="button">로그아웃</button>
+	</div>
+
+	<!-- 로그인 / 회원가입 화면 (로그인 안 했을 때) -->
+	<form id="auth-form" class="hidden">
+		<input id="username-input" placeholder="아이디 (영문·숫자·_ 3~20자)" maxlength="20" autocomplete="username" required>
+		<input id="password-input" type="password" placeholder="비밀번호 (8자 이상)" maxlength="100" autocomplete="current-password" required>
+		<div id="auth-buttons">
+			<button type="submit">로그인</button>
+			<button id="signup-button" type="button">회원가입</button>
+		</div>
+		<p id="auth-error"></p>
+	</form>
 
 	<!-- 방 고르기 화면 (주소가 / 일 때) -->
 	<form id="room-form" class="hidden">
@@ -61,13 +102,7 @@
 		<button type="submit">방으로 가기</button>
 	</form>
 
-	<!-- 입장 화면 (주소가 /room/방이름 일 때) -->
-	<form id="join-form" class="hidden">
-		<input id="nickname-input" placeholder="닉네임" maxlength="20" required>
-		<button type="submit">입장</button>
-	</form>
-
-	<!-- 채팅 화면 (입장하기 전에는 숨겨 둠) -->
+	<!-- 채팅 화면 -->
 	<div id="chat-screen" class="hidden">
 		<div id="messages"></div>
 		<form id="message-form">
@@ -77,16 +112,25 @@
 	</div>
 
 	<script>
-		const joinForm = document.getElementById("join-form");
-		const nicknameInput = document.getElementById("nickname-input");
+		const title = document.getElementById("title");
+
+		const userBar = document.getElementById("user-bar");
+		const userName = document.getElementById("user-name");
+		const logoutButton = document.getElementById("logout-button");
+
+		const authForm = document.getElementById("auth-form");
+		const usernameInput = document.getElementById("username-input");
+		const passwordInput = document.getElementById("password-input");
+		const signupButton = document.getElementById("signup-button");
+		const authError = document.getElementById("auth-error");
+
+		const roomForm = document.getElementById("room-form");
+		const roomInput = document.getElementById("room-input");
+
 		const chatScreen = document.getElementById("chat-screen");
 		const messages = document.getElementById("messages");
 		const messageForm = document.getElementById("message-form");
 		const messageInput = document.getElementById("message-input");
-
-		const title = document.getElementById("title");
-		const roomForm = document.getElementById("room-form");
-		const roomInput = document.getElementById("room-input");
 
 		let socket = null;
 
@@ -100,18 +144,100 @@
 				roomName = "";
 			}
 		}
+		if (roomName.length > 20) {
+			roomName = "";
+		}
 
-		if (roomName === "" || roomName.length > 20) {
-			// 방 이름이 없거나 이상하면 방 고르기 화면을 보여준다.
-			roomForm.classList.remove("hidden");
-			roomInput.focus();
-		} else {
-			// 방 이름이 있으면 제목에 쓰고 입장 화면을 보여준다.
+		if (roomName !== "") {
 			title.textContent = roomName + " 방";
 			document.title = roomName + " 방";
-			joinForm.classList.remove("hidden");
-			nicknameInput.focus();
 		}
+
+		// 메시지 한 줄을 화면에 추가한다.
+		// textContent를 쓰면 누가 HTML 코드를 보내도 글자로만 보여서 안전하다.
+		function addLine(text, className) {
+			const line = document.createElement("p");
+			line.textContent = text;
+			line.className = className;
+			messages.appendChild(line);
+			messages.scrollTop = messages.scrollHeight;
+		}
+
+		// 로그인 안 했을 때: 로그인 화면만 보여준다.
+		function showLogin() {
+			authForm.classList.remove("hidden");
+			usernameInput.focus();
+		}
+
+		// 로그인했을 때: 이름과 로그아웃 버튼을 보여주고, 방 고르기 또는 채팅방 접속
+		function showApp(username) {
+			authForm.classList.add("hidden");
+			userBar.classList.remove("hidden");
+			userName.textContent = username + " 님";
+
+			if (roomName === "") {
+				roomForm.classList.remove("hidden");
+				roomInput.focus();
+			} else {
+				connect(username);
+			}
+		}
+
+		// 페이지를 열면 먼저 로그인했는지 서버에 물어본다.
+		async function start() {
+			const response = await fetch("/api/me");
+			if (response.ok) {
+				const data = await response.json();
+				showApp(data.username);
+			} else {
+				showLogin();
+			}
+		}
+
+		// 로그인 또는 회원가입 요청을 보낸다. (path는 "/api/login" 또는 "/api/signup")
+		async function sendAuth(path) {
+			const username = usernameInput.value.trim();
+			const password = passwordInput.value;
+			if (username === "" || password === "") {
+				authError.textContent = "아이디와 비밀번호를 입력해 주세요.";
+				return;
+			}
+
+			authError.textContent = "";
+			const response = await fetch(path, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ username: username, password: password }),
+			});
+			const data = await response.json();
+
+			if (response.ok) {
+				passwordInput.value = "";
+				showApp(data.username);
+			} else {
+				authError.textContent = data.error;
+			}
+		}
+
+		// 로그인 버튼 (엔터를 눌러도 여기로 온다)
+		authForm.addEventListener("submit", function (event) {
+			event.preventDefault();
+			sendAuth("/api/login");
+		});
+
+		// 회원가입 버튼
+		signupButton.addEventListener("click", function () {
+			sendAuth("/api/signup");
+		});
+
+		// 로그아웃 버튼
+		logoutButton.addEventListener("click", async function () {
+			await fetch("/api/logout", { method: "POST" });
+			if (socket !== null) {
+				socket.close();
+			}
+			location.href = "/";
+		});
 
 		// 방으로 가기 버튼을 눌렀을 때
 		roomForm.addEventListener("submit", function (event) {
@@ -125,38 +251,20 @@
 			location.href = "/room/" + encodeURIComponent(name);
 		});
 
-		// 메시지 한 줄을 화면에 추가한다.
-		// textContent를 쓰면 누가 HTML 코드를 보내도 글자로만 보여서 안전하다.
-		function addLine(text, className) {
-			const line = document.createElement("p");
-			line.textContent = text;
-			line.className = className;
-			messages.appendChild(line);
-			messages.scrollTop = messages.scrollHeight;
-		}
-
-		// 입장 버튼을 눌렀을 때
-		joinForm.addEventListener("submit", function (event) {
-			event.preventDefault();
-
-			const nickname = nicknameInput.value.trim();
-			if (nickname === "") {
-				return;
-			}
-
+		// 채팅방에 접속한다. 이름은 서버가 쿠키를 보고 정하므로 주소에 넣지 않는다.
+		function connect(username) {
 			// https 주소에서는 wss, http 주소에서는 ws를 쓴다.
 			let protocol = "ws:";
 			if (location.protocol === "https:") {
 				protocol = "wss:";
 			}
-			const address = protocol + "//" + location.host + "/ws?room=" + encodeURIComponent(roomName) + "&nickname=" + encodeURIComponent(nickname);
+			const address = protocol + "//" + location.host + "/ws?room=" + encodeURIComponent(roomName);
 
 			socket = new WebSocket(address);
 
 			socket.addEventListener("open", function () {
-				joinForm.classList.add("hidden");
 				chatScreen.classList.remove("hidden");
-				addLine(nickname + " 님으로 입장했어요. (최근 메시지 50개까지 보여요)", "notice");
+				addLine(username + " 님으로 입장했어요. (최근 메시지 50개까지 보여요)", "notice");
 				messageInput.focus();
 			});
 
@@ -167,16 +275,17 @@
 			});
 
 			socket.addEventListener("close", function () {
+				chatScreen.classList.remove("hidden");
 				addLine("연결이 끊어졌어요. 새로고침해서 다시 입장해 주세요.", "notice");
 			});
-		});
+		}
 
 		// 보내기 버튼을 눌렀을 때
 		messageForm.addEventListener("submit", function (event) {
 			event.preventDefault();
 
 			const text = messageInput.value.trim();
-			if (text === "" || socket.readyState !== WebSocket.OPEN) {
+			if (text === "" || socket === null || socket.readyState !== WebSocket.OPEN) {
 				return;
 			}
 
@@ -184,6 +293,8 @@
 			messageInput.value = "";
 			messageInput.focus();
 		});
+
+		start();
 	</script>
 </body>
 </html>
