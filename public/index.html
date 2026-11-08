@@ -98,6 +98,21 @@
 			margin: 8px 0;
 		}
 
+		#group-friend-list label {
+			display: flex;
+			gap: 8px;
+			align-items: center;
+		}
+
+		#group-friend-list input {
+			flex: none;
+		}
+
+		#home-link {
+			display: inline-block;
+			margin-bottom: 8px;
+		}
+
 		.hidden {
 			display: none !important;
 		}
@@ -123,14 +138,14 @@
 		<p id="auth-error"></p>
 	</form>
 
-	<!-- 방 고르기 화면 (주소가 / 일 때) -->
-	<form id="room-form" class="hidden">
-		<input id="room-input" placeholder="방 이름 (예: 축구)" maxlength="20" required>
-		<button type="submit">방으로 가기</button>
-	</form>
+	<!-- 채팅방에서 첫 화면으로 돌아가는 링크 -->
+	<a id="home-link" class="hidden" href="/">← 목록으로</a>
 
-	<!-- 친구 화면 (주소가 / 일 때) -->
+	<!-- 첫 화면 (주소가 / 일 때) -->
 	<div id="friends-screen" class="hidden">
+		<h2>내 채팅방</h2>
+		<ul id="conversation-list"></ul>
+
 		<h2>친구 추가</h2>
 		<form id="friend-form">
 			<input id="friend-input" placeholder="친구 아이디" maxlength="20" autocomplete="off" required>
@@ -143,6 +158,14 @@
 
 		<h2>친구 목록</h2>
 		<ul id="friend-list"></ul>
+
+		<h2>단톡방 만들기</h2>
+		<ul id="group-friend-list"></ul>
+		<form id="group-form">
+			<input id="group-name-input" placeholder="단톡방 이름" maxlength="20" autocomplete="off" required>
+			<button type="submit">만들기</button>
+		</form>
+		<p id="group-message"></p>
 
 		<p><button id="friends-refresh-button" type="button">새로고침</button></p>
 	</div>
@@ -169,8 +192,12 @@
 		const signupButton = document.getElementById("signup-button");
 		const authError = document.getElementById("auth-error");
 
-		const roomForm = document.getElementById("room-form");
-		const roomInput = document.getElementById("room-input");
+		const homeLink = document.getElementById("home-link");
+		const conversationList = document.getElementById("conversation-list");
+		const groupFriendList = document.getElementById("group-friend-list");
+		const groupForm = document.getElementById("group-form");
+		const groupNameInput = document.getElementById("group-name-input");
+		const groupMessage = document.getElementById("group-message");
 
 		const friendsScreen = document.getElementById("friends-screen");
 		const friendForm = document.getElementById("friend-form");
@@ -187,23 +214,13 @@
 
 		let socket = null;
 
-		// 주소에서 방 이름을 꺼낸다. (예: /room/축구 → "축구")
-		// 주소에 한글은 %EC%B6%95... 처럼 바뀌어 있어서 decodeURIComponent로 되돌린다.
-		let roomName = "";
-		if (location.pathname.startsWith("/room/")) {
-			try {
-				roomName = decodeURIComponent(location.pathname.slice("/room/".length)).trim();
-			} catch (error) {
-				roomName = "";
+		// 주소에서 방 번호를 꺼낸다. (예: /chat/12 → "12")
+		let conversationId = "";
+		if (location.pathname.startsWith("/chat/")) {
+			const value = location.pathname.slice("/chat/".length);
+			if (/^[0-9]+$/.test(value)) {
+				conversationId = value;
 			}
-		}
-		if (roomName.length > 20) {
-			roomName = "";
-		}
-
-		if (roomName !== "") {
-			title.textContent = roomName + " 방";
-			document.title = roomName + " 방";
 		}
 
 		// 메시지 한 줄을 화면에 추가한다.
@@ -222,24 +239,45 @@
 			usernameInput.focus();
 		}
 
-		// 로그인했을 때: 이름과 로그아웃 버튼을 보여주고, 방 고르기 또는 채팅방 접속
+		// 방 제목을 받아 오고, 멤버가 맞으면 채팅방에 접속한다.
+		async function openConversation(username) {
+			homeLink.classList.remove("hidden");
+
+			const response = await fetch("/api/conversation?id=" + encodeURIComponent(conversationId));
+			if (!response.ok) {
+				title.textContent = "들어갈 수 없는 방이에요";
+				return;
+			}
+
+			const data = await response.json();
+			title.textContent = data.title;
+			document.title = data.title;
+			connect(username);
+		}
+
+		// 로그인했을 때: 이름과 로그아웃 버튼을 보여주고, 첫 화면 또는 채팅방을 연다.
 		function showApp(username) {
 			authForm.classList.add("hidden");
 			userBar.classList.remove("hidden");
 			userName.textContent = username + " 님";
 
-			if (roomName === "") {
-				roomForm.classList.remove("hidden");
+			if (conversationId === "") {
 				friendsScreen.classList.remove("hidden");
-				roomInput.focus();
+				loadConversations();
 				loadFriends();
 			} else {
-				connect(username);
+				openConversation(username);
 			}
 		}
 
 		// 페이지를 열면 먼저 로그인했는지 서버에 물어본다.
 		async function start() {
+			// /room/축구 같은 옛 주소나 잘못된 주소는 첫 화면으로 보낸다.
+			if (location.pathname !== "/" && conversationId === "") {
+				location.replace("/");
+				return;
+			}
+
 			const response = await fetch("/api/me");
 			if (response.ok) {
 				const data = await response.json();
@@ -294,18 +332,6 @@
 			location.href = "/";
 		});
 
-		// 방으로 가기 버튼을 눌렀을 때
-		roomForm.addEventListener("submit", function (event) {
-			event.preventDefault();
-
-			const name = roomInput.value.trim();
-			if (name === "") {
-				return;
-			}
-
-			location.href = "/room/" + encodeURIComponent(name);
-		});
-
 		// 목록이 비었을 때 안내 문구를 한 줄 넣는다.
 		function addEmptyLine(list, text) {
 			const item = document.createElement("li");
@@ -351,15 +377,107 @@
 
 			// 친구 목록 그리기
 			friendList.textContent = "";
+			groupFriendList.textContent = "";
 			if (friendsData.friends.length === 0) {
 				addEmptyLine(friendList, "아직 친구가 없어요.");
+				addEmptyLine(groupFriendList, "친구가 생기면 고를 수 있어요.");
 			}
 			for (const friend of friendsData.friends) {
+				// 이름을 누르면 1:1 방으로 들어간다.
 				const item = document.createElement("li");
-				item.textContent = friend.username;
+				const button = document.createElement("button");
+				button.type = "button";
+				button.textContent = friend.username;
+				button.addEventListener("click", function () {
+					openDm(friend.username);
+				});
+				item.appendChild(button);
 				friendList.appendChild(item);
+
+				// 단톡방에 넣을 친구를 고르는 체크박스
+				const groupItem = document.createElement("li");
+				const label = document.createElement("label");
+				const checkbox = document.createElement("input");
+				checkbox.type = "checkbox";
+				checkbox.value = friend.username;
+				label.appendChild(checkbox);
+				label.appendChild(document.createTextNode(friend.username));
+				groupItem.appendChild(label);
+				groupFriendList.appendChild(groupItem);
 			}
 		}
+
+		// 내가 들어가 있는 방 목록을 그린다. (서버가 최근 메시지 순서로 준다)
+		async function loadConversations() {
+			const response = await fetch("/api/conversations");
+			if (!response.ok) {
+				return;
+			}
+
+			const data = await response.json();
+			conversationList.textContent = "";
+			if (data.conversations.length === 0) {
+				addEmptyLine(conversationList, "아직 채팅방이 없어요.");
+			}
+			for (const conversation of data.conversations) {
+				const item = document.createElement("li");
+				const link = document.createElement("a");
+				link.href = "/chat/" + conversation.id;
+				link.textContent = conversation.title;
+				item.appendChild(link);
+
+				const kind = document.createElement("span");
+				kind.className = "notice";
+				if (conversation.type === "group") {
+					kind.textContent = "단톡";
+				} else {
+					kind.textContent = "1:1";
+				}
+				item.appendChild(kind);
+
+				conversationList.appendChild(item);
+			}
+		}
+
+		// 친구와의 1:1 방으로 들어간다. (같은 두 사람은 항상 같은 방)
+		async function openDm(username) {
+			const response = await fetch("/api/dm", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ username: username }),
+			});
+			const data = await response.json();
+
+			if (response.ok) {
+				location.href = "/chat/" + data.id;
+			} else {
+				friendMessage.textContent = data.error;
+			}
+		}
+
+		// 단톡방 만들기 버튼을 눌렀을 때
+		groupForm.addEventListener("submit", async function (event) {
+			event.preventDefault();
+
+			const usernames = [];
+			const checkboxes = groupFriendList.querySelectorAll("input:checked");
+			for (const checkbox of checkboxes) {
+				usernames.push(checkbox.value);
+			}
+
+			const response = await fetch("/api/groups", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ name: groupNameInput.value.trim(), usernames: usernames }),
+			});
+			const data = await response.json();
+
+			if (response.ok) {
+				location.href = "/chat/" + data.id;
+			} else {
+				groupMessage.textContent = data.error;
+			}
+		});
 
 		// 친구 신청을 수락한다.
 		async function acceptRequest(id) {
@@ -405,6 +523,7 @@
 		// 새로고침 버튼: 상대가 수락했는지 다시 확인한다.
 		friendsRefreshButton.addEventListener("click", function () {
 			friendMessage.textContent = "";
+			loadConversations();
 			loadFriends();
 		});
 
@@ -415,7 +534,7 @@
 			if (location.protocol === "https:") {
 				protocol = "wss:";
 			}
-			const address = protocol + "//" + location.host + "/ws?room=" + encodeURIComponent(roomName);
+			const address = protocol + "//" + location.host + "/ws?conversation=" + encodeURIComponent(conversationId);
 
 			socket = new WebSocket(address);
 

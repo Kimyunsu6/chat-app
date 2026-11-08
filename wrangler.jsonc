@@ -33,7 +33,7 @@
 	],
 	"assets": {
 		"directory": "./public/",
-		// /room/축구 처럼 없는 주소로 들어와도 index.html을 보여준다.
+		// /chat/12 처럼 없는 주소로 들어와도 index.html을 보여준다.
 		"not_found_handling": "single-page-application",
 		// /api/... 와 /ws 요청은 항상 Worker 코드가 처리한다.
 		"run_worker_first": ["/api/*", "/ws"]

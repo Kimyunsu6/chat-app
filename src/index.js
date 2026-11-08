@@ -22,6 +22,7 @@ export class ChatRoom extends DurableObject {
 	async fetch(request) {
 		const url = new URL(request.url);
 		const username = url.searchParams.get("username");
+		const conversationId = Number(url.searchParams.get("conversationId"));
 
 		// WebSocket의 양쪽 끝을 만든다. (client는 브라우저용, server는 채팅방용)
 		const pair = new WebSocketPair();
@@ -30,7 +31,7 @@ export class ChatRoom extends DurableObject {
 
 		// 채팅방이 server 쪽 연결을 맡고, 이 연결의 이름을 기억해 둔다.
 		this.ctx.acceptWebSocket(server);
-		server.serializeAttachment({ nickname: username });
+		server.serializeAttachment({ nickname: username, conversationId: conversationId });
 
 		// 최근 메시지 50개를 꺼낸다. (최신 것부터 50개)
 		const rows = this.ctx.storage.sql
@@ -75,6 +76,16 @@ export class ChatRoom extends DurableObject {
 		const sockets = this.ctx.getWebSockets();
 		for (const socket of sockets) {
 			socket.send(data);
+		}
+
+		// 방 목록에서 이 방이 위로 오도록 최근 메시지 시간을 D1에 적는다.
+		// 실패해도 메시지는 이미 저장하고 보냈으므로 기록만 남긴다.
+		try {
+			await this.env.DB.prepare("UPDATE conversations SET last_message_at = ? WHERE id = ?")
+				.bind(Date.now(), info.conversationId)
+				.run();
+		} catch (error) {
+			console.error("최근 메시지 시간 저장 실패", error);
 		}
 	}
 }
@@ -392,6 +403,21 @@ async function acceptFriend(request, env) {
 	return jsonResponse({ ok: true }, 200);
 }
 
+// 어떤 사람의 친구들을 [{ id, username }, ...] 모양으로 찾는다.
+async function getFriends(env, userId) {
+	// CASE: 내가 신청한 쪽이면 받은 사람이, 내가 받은 쪽이면 신청한 사람이 친구이다.
+	const result = await env.DB.prepare(
+		"SELECT users.id, users.username FROM friends " +
+			"JOIN users ON users.id = CASE WHEN friends.requester_id = ? THEN friends.addressee_id ELSE friends.requester_id END " +
+			"WHERE friends.status = 'accepted' AND (friends.requester_id = ? OR friends.addressee_id = ?) " +
+			"ORDER BY users.username"
+	)
+		.bind(userId, userId, userId)
+		.run();
+
+	return result.results;
+}
+
 // 내 친구 목록을 돌려준다.
 async function listFriends(request, env) {
 	const user = await getLoggedInUser(request, env);
@@ -399,17 +425,12 @@ async function listFriends(request, env) {
 		return jsonResponse({ error: "로그인이 필요해요." }, 401);
 	}
 
-	// CASE: 내가 신청한 쪽이면 받은 사람이, 내가 받은 쪽이면 신청한 사람이 친구이다.
-	const result = await env.DB.prepare(
-		"SELECT users.username FROM friends " +
-			"JOIN users ON users.id = CASE WHEN friends.requester_id = ? THEN friends.addressee_id ELSE friends.requester_id END " +
-			"WHERE friends.status = 'accepted' AND (friends.requester_id = ? OR friends.addressee_id = ?) " +
-			"ORDER BY users.username"
-	)
-		.bind(user.id, user.id, user.id)
-		.run();
-
-	return jsonResponse({ friends: result.results }, 200);
+	const rows = await getFriends(env, user.id);
+	const friends = [];
+	for (const row of rows) {
+		friends.push({ username: row.username });
+	}
+	return jsonResponse({ friends: friends }, 200);
 }
 
 // 내가 받은 친구 신청 목록을 돌려준다.
@@ -431,6 +452,184 @@ async function listFriendRequests(request, env) {
 	return jsonResponse({ requests: result.results }, 200);
 }
 
+// ---------- 대화방 (1:1·단톡) ----------
+
+// 주소에 온 방 번호를 숫자로 바꾼다. 숫자가 아니면 0을 돌려준다.
+function parseConversationId(value) {
+	if (value === null || !/^[0-9]{1,15}$/.test(value)) {
+		return 0;
+	}
+	return Number(value);
+}
+
+// 이 사람이 이 방의 멤버인지 확인한다.
+async function isMember(env, conversationId, userId) {
+	const row = await env.DB.prepare("SELECT user_id FROM conversation_members WHERE conversation_id = ? AND user_id = ?")
+		.bind(conversationId, userId)
+		.first();
+	return row !== null;
+}
+
+// 친구와의 1:1 방 번호를 돌려준다. 방이 없으면 새로 만든다.
+async function startDm(request, env) {
+	const user = await getLoggedInUser(request, env);
+	if (user === null) {
+		return jsonResponse({ error: "로그인이 필요해요." }, 401);
+	}
+
+	const body = await readJson(request);
+	if (body === null || typeof body.username !== "string") {
+		return jsonResponse({ error: "잘못된 요청이에요." }, 400);
+	}
+
+	// 친구인 사람과만 1:1을 시작할 수 있다.
+	const friends = await getFriends(env, user.id);
+	let friendId = 0;
+	for (const friend of friends) {
+		if (friend.username === body.username) {
+			friendId = friend.id;
+		}
+	}
+	if (friendId === 0) {
+		return jsonResponse({ error: "친구와만 대화할 수 있어요." }, 403);
+	}
+
+	const dmKey = makePairKey(user.id, friendId);
+	const now = Date.now();
+
+	// INSERT OR IGNORE: 이미 있으면 아무것도 하지 않는다.
+	// batch는 한꺼번에 처리되어서, 방만 생기고 멤버가 빠지는 일이 없다.
+	const addMember =
+		"INSERT OR IGNORE INTO conversation_members (conversation_id, user_id) " +
+		"SELECT id, ? FROM conversations WHERE dm_key = ?";
+	await env.DB.batch([
+		env.DB.prepare(
+			"INSERT OR IGNORE INTO conversations (type, dm_key, name, created_at, last_message_at) VALUES ('dm', ?, '', ?, ?)"
+		).bind(dmKey, now, now),
+		env.DB.prepare(addMember).bind(user.id, dmKey),
+		env.DB.prepare(addMember).bind(friendId, dmKey),
+	]);
+
+	const room = await env.DB.prepare("SELECT id FROM conversations WHERE dm_key = ?").bind(dmKey).first();
+	return jsonResponse({ id: room.id }, 200);
+}
+
+// 친구 여러 명을 골라 단톡방을 만든다. (나 빼고 2~20명)
+async function createGroup(request, env) {
+	const user = await getLoggedInUser(request, env);
+	if (user === null) {
+		return jsonResponse({ error: "로그인이 필요해요." }, 401);
+	}
+
+	const body = await readJson(request);
+	if (body === null || typeof body.name !== "string" || !Array.isArray(body.usernames)) {
+		return jsonResponse({ error: "잘못된 요청이에요." }, 400);
+	}
+
+	const name = cleanName(body.name);
+	if (name === "") {
+		return jsonResponse({ error: "방 이름은 1~20자로 입력해 주세요." }, 400);
+	}
+	if (body.usernames.length > 20) {
+		return jsonResponse({ error: "친구는 20명까지 고를 수 있어요." }, 400);
+	}
+
+	// 고른 사람이 모두 내 친구인지 확인한다. 같은 사람은 한 번만 넣는다.
+	const friends = await getFriends(env, user.id);
+	const memberIds = [user.id];
+	for (const username of body.usernames) {
+		let friendId = 0;
+		for (const friend of friends) {
+			if (friend.username === username) {
+				friendId = friend.id;
+			}
+		}
+		if (friendId === 0) {
+			return jsonResponse({ error: "친구만 초대할 수 있어요." }, 403);
+		}
+		if (!memberIds.includes(friendId)) {
+			memberIds.push(friendId);
+		}
+	}
+	if (memberIds.length < 3) {
+		return jsonResponse({ error: "친구를 2명 이상 골라 주세요." }, 400);
+	}
+
+	const now = Date.now();
+	const result = await env.DB.prepare(
+		"INSERT INTO conversations (type, name, created_at, last_message_at) VALUES ('group', ?, ?, ?)"
+	)
+		.bind(name, now, now)
+		.run();
+	const conversationId = result.meta.last_row_id;
+
+	const statements = [];
+	for (const memberId of memberIds) {
+		statements.push(
+			env.DB.prepare("INSERT INTO conversation_members (conversation_id, user_id) VALUES (?, ?)").bind(conversationId, memberId)
+		);
+	}
+	await env.DB.batch(statements);
+
+	return jsonResponse({ id: conversationId }, 200);
+}
+
+// 내가 들어가 있는 방 목록을 최근 메시지 순서로 돌려준다.
+async function listConversations(request, env) {
+	const user = await getLoggedInUser(request, env);
+	if (user === null) {
+		return jsonResponse({ error: "로그인이 필요해요." }, 401);
+	}
+
+	// other_name: 나를 뺀 멤버 한 명의 아이디 (1:1 방의 제목으로 쓴다)
+	const result = await env.DB.prepare(
+		"SELECT conversations.id, conversations.type, conversations.name, " +
+			"(SELECT users.username FROM conversation_members AS other JOIN users ON users.id = other.user_id " +
+			"WHERE other.conversation_id = conversations.id AND other.user_id != ? LIMIT 1) AS other_name " +
+			"FROM conversations JOIN conversation_members AS mine ON mine.conversation_id = conversations.id " +
+			"WHERE mine.user_id = ? " +
+			"ORDER BY conversations.last_message_at DESC, conversations.id DESC"
+	)
+		.bind(user.id, user.id)
+		.run();
+
+	const conversations = [];
+	for (const row of result.results) {
+		let title = row.name;
+		if (row.type === "dm") {
+			title = row.other_name;
+		}
+		conversations.push({ id: row.id, type: row.type, title: title });
+	}
+	return jsonResponse({ conversations: conversations }, 200);
+}
+
+// 방 하나의 제목을 돌려준다. 멤버가 아니면 없는 방과 똑같이 대답한다.
+async function conversationInfo(request, env, url) {
+	const user = await getLoggedInUser(request, env);
+	if (user === null) {
+		return jsonResponse({ error: "로그인이 필요해요." }, 401);
+	}
+
+	const conversationId = parseConversationId(url.searchParams.get("id"));
+	if (conversationId === 0 || !(await isMember(env, conversationId, user.id))) {
+		return jsonResponse({ error: "방을 찾을 수 없어요." }, 404);
+	}
+
+	const room = await env.DB.prepare("SELECT type, name FROM conversations WHERE id = ?").bind(conversationId).first();
+	let title = room.name;
+	if (room.type === "dm") {
+		const other = await env.DB.prepare(
+			"SELECT users.username FROM conversation_members JOIN users ON users.id = conversation_members.user_id " +
+				"WHERE conversation_members.conversation_id = ? AND conversation_members.user_id != ? LIMIT 1"
+		)
+			.bind(conversationId, user.id)
+			.first();
+		title = other.username;
+	}
+	return jsonResponse({ id: conversationId, type: room.type, title: title }, 200);
+}
+
 // ---------- 채팅방 접속 ----------
 
 async function connectChat(request, env, url) {
@@ -450,22 +649,27 @@ async function connectChat(request, env, url) {
 		return new Response("로그인이 필요해요.", { status: 401 });
 	}
 
-	const roomName = cleanName(url.searchParams.get("room"));
-	if (roomName === "") {
-		return new Response("방 이름은 1~20자로 입력해 주세요.", { status: 400 });
+	const conversationId = parseConversationId(url.searchParams.get("conversation"));
+	if (conversationId === 0) {
+		return new Response("방 번호가 잘못됐어요.", { status: 400 });
+	}
+
+	// 이 방의 멤버만 들어올 수 있다.
+	if (!(await isMember(env, conversationId, user.id))) {
+		return new Response("이 방의 멤버가 아니에요.", { status: 403 });
 	}
 
 	// 채팅방에는 서버가 확인한 아이디만 넘긴다. (브라우저가 보낸 이름은 쓰지 않는다)
 	const roomUrl = new URL(url);
-	roomUrl.search = "?username=" + encodeURIComponent(user.username);
+	roomUrl.search = "?username=" + encodeURIComponent(user.username) + "&conversationId=" + conversationId;
 
-	// 방 이름이 같으면 같은 채팅방, 다르면 다른 채팅방으로 간다.
-	const room = env.CHAT_ROOM.getByName(roomName);
+	// 방 번호마다 채팅방이 하나씩 있다.
+	const room = env.CHAT_ROOM.getByName("conversation:" + conversationId);
 	return room.fetch(new Request(roomUrl, request));
 }
 
 // 모든 요청이 처음 도착하는 곳
-// (index.html 같은 파일 요청과 /room/... 페이지 열기는 public 폴더에서 바로 처리되어 여기로 오지 않는다.)
+// (index.html 같은 파일 요청과 /chat/... 페이지 열기는 public 폴더에서 바로 처리되어 여기로 오지 않는다.)
 export default {
 	async fetch(request, env) {
 		const url = new URL(request.url);
@@ -489,6 +693,18 @@ export default {
 		}
 		if (url.pathname === "/api/friends/accept" && request.method === "POST") {
 			return acceptFriend(request, env);
+		}
+		if (url.pathname === "/api/conversations" && request.method === "GET") {
+			return listConversations(request, env);
+		}
+		if (url.pathname === "/api/conversation" && request.method === "GET") {
+			return conversationInfo(request, env, url);
+		}
+		if (url.pathname === "/api/dm" && request.method === "POST") {
+			return startDm(request, env);
+		}
+		if (url.pathname === "/api/groups" && request.method === "POST") {
+			return createGroup(request, env);
 		}
 		if (url.pathname === "/api/signup" && request.method === "POST") {
 			return signup(request, env, url);
