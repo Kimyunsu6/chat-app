@@ -15,3 +15,16 @@ CREATE TABLE IF NOT EXISTS sessions (
 	user_id INTEGER NOT NULL,
 	expires_at INTEGER NOT NULL
 );
+
+-- 친구 표
+-- status는 'pending'(수락 대기) 또는 'accepted'(친구)이다.
+-- pair_key는 두 사람의 번호를 작은 번호부터 쓴 글자이다. (예: 3과 7이면 "3:7")
+-- UNIQUE라서 두 사람 사이에는 신청이 하나만 있을 수 있다.
+CREATE TABLE IF NOT EXISTS friends (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	requester_id INTEGER NOT NULL,
+	addressee_id INTEGER NOT NULL,
+	pair_key TEXT NOT NULL UNIQUE,
+	status TEXT NOT NULL,
+	created_at INTEGER NOT NULL
+);

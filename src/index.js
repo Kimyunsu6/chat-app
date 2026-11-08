@@ -194,24 +194,22 @@ function makeCookie(token, maxAge, url) {
 	return cookie;
 }
 
-// 쿠키를 보고 로그인한 사람의 아이디를 찾는다. 로그인 안 했으면 ""을 돌려준다.
+// 쿠키를 보고 로그인한 사람을 찾는다.
+// 로그인했으면 { id, username }을, 안 했으면 null을 돌려준다.
 async function getLoggedInUser(request, env) {
 	const token = getCookie(request, "session");
 	if (token === "") {
-		return "";
+		return null;
 	}
 
 	const row = await env.DB.prepare(
-		"SELECT users.username FROM sessions JOIN users ON users.id = sessions.user_id " +
+		"SELECT users.id, users.username FROM sessions JOIN users ON users.id = sessions.user_id " +
 			"WHERE sessions.token = ? AND sessions.expires_at > ?"
 	)
 		.bind(token, Date.now())
 		.first();
 
-	if (row === null) {
-		return "";
-	}
-	return row.username;
+	return row;
 }
 
 // ---------- API ----------
@@ -302,11 +300,135 @@ async function logout(request, env, url) {
 
 // 지금 로그인한 사람이 누구인지 알려준다.
 async function me(request, env) {
-	const username = await getLoggedInUser(request, env);
-	if (username === "") {
+	const user = await getLoggedInUser(request, env);
+	if (user === null) {
 		return jsonResponse({ error: "로그인이 필요해요." }, 401);
 	}
-	return jsonResponse({ username: username }, 200);
+	return jsonResponse({ username: user.username }, 200);
+}
+
+// ---------- 친구 ----------
+
+// 두 사람의 번호로 항상 똑같은 글자를 만든다. (3과 7이든 7과 3이든 "3:7")
+function makePairKey(a, b) {
+	if (a < b) {
+		return a + ":" + b;
+	}
+	return b + ":" + a;
+}
+
+// 아이디로 친구 신청을 보낸다.
+async function requestFriend(request, env) {
+	const user = await getLoggedInUser(request, env);
+	if (user === null) {
+		return jsonResponse({ error: "로그인이 필요해요." }, 401);
+	}
+
+	const body = await readJson(request);
+	if (body === null || typeof body.username !== "string") {
+		return jsonResponse({ error: "친구의 아이디를 입력해 주세요." }, 400);
+	}
+
+	const target = await env.DB.prepare("SELECT id FROM users WHERE username = ?").bind(body.username.trim()).first();
+	if (target === null) {
+		return jsonResponse({ error: "없는 아이디예요." }, 404);
+	}
+	if (target.id === user.id) {
+		return jsonResponse({ error: "나 자신에게는 신청할 수 없어요." }, 400);
+	}
+
+	const pairKey = makePairKey(user.id, target.id);
+
+	// 두 사람 사이에 이미 신청이나 친구 관계가 있는지 확인한다.
+	const existing = await env.DB.prepare("SELECT requester_id, status FROM friends WHERE pair_key = ?")
+		.bind(pairKey)
+		.first();
+	if (existing !== null) {
+		if (existing.status === "accepted") {
+			return jsonResponse({ error: "이미 친구예요." }, 409);
+		}
+		if (existing.requester_id === user.id) {
+			return jsonResponse({ error: "이미 신청했어요." }, 409);
+		}
+		return jsonResponse({ error: "상대가 먼저 신청했어요. 받은 신청을 수락해 주세요." }, 409);
+	}
+
+	try {
+		await env.DB.prepare(
+			"INSERT INTO friends (requester_id, addressee_id, pair_key, status, created_at) VALUES (?, ?, ?, 'pending', ?)"
+		)
+			.bind(user.id, target.id, pairKey, Date.now())
+			.run();
+	} catch (error) {
+		// 거의 동시에 서로 신청하면 여기로 온다. (UNIQUE 규칙)
+		return jsonResponse({ error: "이미 신청이 있어요. 새로고침해 주세요." }, 409);
+	}
+
+	return jsonResponse({ ok: true }, 200);
+}
+
+// 받은 친구 신청을 수락한다.
+// addressee_id까지 확인하므로 나에게 온 신청만 수락할 수 있다.
+async function acceptFriend(request, env) {
+	const user = await getLoggedInUser(request, env);
+	if (user === null) {
+		return jsonResponse({ error: "로그인이 필요해요." }, 401);
+	}
+
+	const body = await readJson(request);
+	if (body === null || typeof body.id !== "number") {
+		return jsonResponse({ error: "잘못된 요청이에요." }, 400);
+	}
+
+	const result = await env.DB.prepare(
+		"UPDATE friends SET status = 'accepted' WHERE id = ? AND addressee_id = ? AND status = 'pending'"
+	)
+		.bind(body.id, user.id)
+		.run();
+
+	if (result.meta.changes === 0) {
+		return jsonResponse({ error: "수락할 수 있는 신청이 아니에요." }, 404);
+	}
+	return jsonResponse({ ok: true }, 200);
+}
+
+// 내 친구 목록을 돌려준다.
+async function listFriends(request, env) {
+	const user = await getLoggedInUser(request, env);
+	if (user === null) {
+		return jsonResponse({ error: "로그인이 필요해요." }, 401);
+	}
+
+	// CASE: 내가 신청한 쪽이면 받은 사람이, 내가 받은 쪽이면 신청한 사람이 친구이다.
+	const result = await env.DB.prepare(
+		"SELECT users.username FROM friends " +
+			"JOIN users ON users.id = CASE WHEN friends.requester_id = ? THEN friends.addressee_id ELSE friends.requester_id END " +
+			"WHERE friends.status = 'accepted' AND (friends.requester_id = ? OR friends.addressee_id = ?) " +
+			"ORDER BY users.username"
+	)
+		.bind(user.id, user.id, user.id)
+		.run();
+
+	return jsonResponse({ friends: result.results }, 200);
+}
+
+// 내가 받은 친구 신청 목록을 돌려준다.
+async function listFriendRequests(request, env) {
+	const user = await getLoggedInUser(request, env);
+	if (user === null) {
+		return jsonResponse({ error: "로그인이 필요해요." }, 401);
+	}
+
+	const result = await env.DB.prepare(
+		"SELECT friends.id, users.username FROM friends " +
+			"JOIN users ON users.id = friends.requester_id " +
+			"WHERE friends.addressee_id = ? AND friends.status = 'pending' " +
+			"ORDER BY friends.created_at"
+	)
+		.bind(user.id)
+		.run();
+
+	return jsonResponse({ requests: result.results }, 200);
 }
 
 // ---------- 채팅방 접속 ----------
@@ -323,8 +445,8 @@ async function connectChat(request, env, url) {
 	}
 
 	// 로그인 안 한 사람은 못 들어온다.
-	const username = await getLoggedInUser(request, env);
-	if (username === "") {
+	const user = await getLoggedInUser(request, env);
+	if (user === null) {
 		return new Response("로그인이 필요해요.", { status: 401 });
 	}
 
@@ -335,7 +457,7 @@ async function connectChat(request, env, url) {
 
 	// 채팅방에는 서버가 확인한 아이디만 넘긴다. (브라우저가 보낸 이름은 쓰지 않는다)
 	const roomUrl = new URL(url);
-	roomUrl.search = "?username=" + encodeURIComponent(username);
+	roomUrl.search = "?username=" + encodeURIComponent(user.username);
 
 	// 방 이름이 같으면 같은 채팅방, 다르면 다른 채팅방으로 간다.
 	const room = env.CHAT_ROOM.getByName(roomName);
@@ -352,9 +474,21 @@ export default {
 			return connectChat(request, env, url);
 		}
 
-		// 아래 API들은 POST로만 받는다. (/api/me만 GET)
+		// 조회하는 API는 GET, 무언가를 바꾸는 API는 POST로만 받는다.
 		if (url.pathname === "/api/me" && request.method === "GET") {
 			return me(request, env);
+		}
+		if (url.pathname === "/api/friends" && request.method === "GET") {
+			return listFriends(request, env);
+		}
+		if (url.pathname === "/api/friends/requests" && request.method === "GET") {
+			return listFriendRequests(request, env);
+		}
+		if (url.pathname === "/api/friends/request" && request.method === "POST") {
+			return requestFriend(request, env);
+		}
+		if (url.pathname === "/api/friends/accept" && request.method === "POST") {
+			return acceptFriend(request, env);
 		}
 		if (url.pathname === "/api/signup" && request.method === "POST") {
 			return signup(request, env, url);

@@ -71,6 +71,33 @@
 			color: #666;
 		}
 
+		#friends-screen {
+			margin-top: 16px;
+		}
+
+		#friends-screen h2 {
+			font-size: 18px;
+			margin: 16px 0 8px;
+		}
+
+		#friends-screen li {
+			display: flex;
+			justify-content: space-between;
+			align-items: center;
+			padding: 4px 0;
+			overflow-wrap: anywhere;
+		}
+
+		#friends-screen ul {
+			list-style: none;
+			padding: 0;
+			margin: 0;
+		}
+
+		#friend-message {
+			margin: 8px 0;
+		}
+
 		.hidden {
 			display: none !important;
 		}
@@ -102,6 +129,24 @@
 		<button type="submit">방으로 가기</button>
 	</form>
 
+	<!-- 친구 화면 (주소가 / 일 때) -->
+	<div id="friends-screen" class="hidden">
+		<h2>친구 추가</h2>
+		<form id="friend-form">
+			<input id="friend-input" placeholder="친구 아이디" maxlength="20" autocomplete="off" required>
+			<button type="submit">신청</button>
+		</form>
+		<p id="friend-message"></p>
+
+		<h2>받은 신청</h2>
+		<ul id="request-list"></ul>
+
+		<h2>친구 목록</h2>
+		<ul id="friend-list"></ul>
+
+		<p><button id="friends-refresh-button" type="button">새로고침</button></p>
+	</div>
+
 	<!-- 채팅 화면 -->
 	<div id="chat-screen" class="hidden">
 		<div id="messages"></div>
@@ -126,6 +171,14 @@
 
 		const roomForm = document.getElementById("room-form");
 		const roomInput = document.getElementById("room-input");
+
+		const friendsScreen = document.getElementById("friends-screen");
+		const friendForm = document.getElementById("friend-form");
+		const friendInput = document.getElementById("friend-input");
+		const friendMessage = document.getElementById("friend-message");
+		const requestList = document.getElementById("request-list");
+		const friendList = document.getElementById("friend-list");
+		const friendsRefreshButton = document.getElementById("friends-refresh-button");
 
 		const chatScreen = document.getElementById("chat-screen");
 		const messages = document.getElementById("messages");
@@ -177,7 +230,9 @@
 
 			if (roomName === "") {
 				roomForm.classList.remove("hidden");
+				friendsScreen.classList.remove("hidden");
 				roomInput.focus();
+				loadFriends();
 			} else {
 				connect(username);
 			}
@@ -249,6 +304,108 @@
 			}
 
 			location.href = "/room/" + encodeURIComponent(name);
+		});
+
+		// 목록이 비었을 때 안내 문구를 한 줄 넣는다.
+		function addEmptyLine(list, text) {
+			const item = document.createElement("li");
+			item.textContent = text;
+			item.className = "notice";
+			list.appendChild(item);
+		}
+
+		// 받은 신청과 친구 목록을 서버에서 받아서 화면에 그린다.
+		async function loadFriends() {
+			const requestsResponse = await fetch("/api/friends/requests");
+			const friendsResponse = await fetch("/api/friends");
+			if (!requestsResponse.ok || !friendsResponse.ok) {
+				friendMessage.textContent = "목록을 불러오지 못했어요. 다시 로그인해 주세요.";
+				return;
+			}
+
+			const requestsData = await requestsResponse.json();
+			const friendsData = await friendsResponse.json();
+
+			// 받은 신청 그리기
+			requestList.textContent = "";
+			if (requestsData.requests.length === 0) {
+				addEmptyLine(requestList, "받은 신청이 없어요.");
+			}
+			for (const request of requestsData.requests) {
+				const item = document.createElement("li");
+
+				const name = document.createElement("span");
+				name.textContent = request.username;
+				item.appendChild(name);
+
+				const button = document.createElement("button");
+				button.type = "button";
+				button.textContent = "수락";
+				button.addEventListener("click", function () {
+					acceptRequest(request.id);
+				});
+				item.appendChild(button);
+
+				requestList.appendChild(item);
+			}
+
+			// 친구 목록 그리기
+			friendList.textContent = "";
+			if (friendsData.friends.length === 0) {
+				addEmptyLine(friendList, "아직 친구가 없어요.");
+			}
+			for (const friend of friendsData.friends) {
+				const item = document.createElement("li");
+				item.textContent = friend.username;
+				friendList.appendChild(item);
+			}
+		}
+
+		// 친구 신청을 수락한다.
+		async function acceptRequest(id) {
+			const response = await fetch("/api/friends/accept", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ id: id }),
+			});
+			const data = await response.json();
+
+			if (response.ok) {
+				friendMessage.textContent = "친구가 되었어요.";
+			} else {
+				friendMessage.textContent = data.error;
+			}
+			loadFriends();
+		}
+
+		// 친구 신청 버튼을 눌렀을 때
+		friendForm.addEventListener("submit", async function (event) {
+			event.preventDefault();
+
+			const username = friendInput.value.trim();
+			if (username === "") {
+				return;
+			}
+
+			const response = await fetch("/api/friends/request", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ username: username }),
+			});
+			const data = await response.json();
+
+			if (response.ok) {
+				friendInput.value = "";
+				friendMessage.textContent = username + " 님에게 신청했어요.";
+			} else {
+				friendMessage.textContent = data.error;
+			}
+		});
+
+		// 새로고침 버튼: 상대가 수락했는지 다시 확인한다.
+		friendsRefreshButton.addEventListener("click", function () {
+			friendMessage.textContent = "";
+			loadFriends();
 		});
 
 		// 채팅방에 접속한다. 이름은 서버가 쿠키를 보고 정하므로 주소에 넣지 않는다.
