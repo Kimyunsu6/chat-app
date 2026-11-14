@@ -569,7 +569,13 @@ async function createGroup(request, env) {
 			env.DB.prepare("INSERT INTO conversation_members (conversation_id, user_id) VALUES (?, ?)").bind(conversationId, memberId)
 		);
 	}
-	await env.DB.batch(statements);
+	// 멤버를 넣다가 실패하면, 멤버 없는 빈 방이 남지 않도록 방도 지운다.
+	try {
+		await env.DB.batch(statements);
+	} catch (error) {
+		await env.DB.prepare("DELETE FROM conversations WHERE id = ?").bind(conversationId).run();
+		return jsonResponse({ error: "방을 만들지 못했어요. 잠시 후 다시 해 주세요." }, 500);
+	}
 
 	return jsonResponse({ id: conversationId }, 200);
 }
